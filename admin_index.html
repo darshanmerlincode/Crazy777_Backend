@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crazy777 Development Admin</title>
+  <style>
+    :root { color-scheme: dark; font: 15px system-ui, sans-serif; background: #10131b; color: #f2f4f8; }
+    body { margin: 0; padding: 2rem; }
+    main { margin: 0 auto; max-width: 72rem; }
+    section { background: #1b2130; border: 1px solid #30394c; border-radius: .75rem; margin: 1rem 0; padding: 1.25rem; }
+    form { display: grid; gap: .8rem; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); align-items: end; }
+    label { display: grid; gap: .35rem; }
+    input, button, textarea { border: 1px solid #454e63; border-radius: .4rem; font: inherit; padding: .65rem; }
+    input, textarea { background: #10131b; color: inherit; }
+    button { background: #9cdb73; border: 0; color: #14200d; cursor: pointer; font-weight: 700; }
+    button.secondary { background: #39455f; color: #f2f4f8; }
+    button.danger { background: #a94c58; color: white; }
+    button:disabled { cursor: wait; opacity: .6; }
+    .notice { border-left: 4px solid #ffc85b; padding-left: .75rem; }
+    .row { align-items: end; display: flex; flex-wrap: wrap; gap: .75rem; }
+    .row label { flex: 1; min-width: 14rem; }
+    .token { display: grid; gap: .6rem; }
+    .token textarea { min-height: 5rem; overflow-wrap: anywhere; resize: vertical; width: 100%; }
+    .table-wrap { overflow-x: auto; }
+    table { border-collapse: collapse; min-width: 46rem; width: 100%; }
+    th, td { border-bottom: 1px solid #394154; padding: .7rem; text-align: left; }
+    td button { margin: .1rem; }
+    #status { min-height: 1.5rem; white-space: pre-wrap; }
+    .muted { color: #b5bfd1; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Crazy777 development admin</h1>
+    <p class="notice">Development only. All balances are non-redeemable demo credits. Never expose the Supabase service-role key here; this page sends admin requests only to this backend.</p>
+
+    <section>
+      <h2>Admin access</h2>
+      <form id="admin-key-form">
+        <label>Development admin key
+          <input id="admin-key" type="password" autocomplete="current-password" minlength="32" required>
+        </label>
+        <button type="submit">Unlock panel</button>
+        <button type="button" class="secondary" id="clear-key">Lock / clear key</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Create a demo player and Unity test token</h2>
+      <form id="create-form">
+        <label>Email <input name="email" type="email" autocomplete="off" required></label>
+        <label>Username <input name="username" minlength="2" maxlength="32" autocomplete="off"></label>
+        <label>Password (8+ characters) <input name="password" type="password" minlength="8" autocomplete="new-password" required></label>
+        <button type="submit">Create player and issue token</button>
+      </form>
+      <div id="token-panel" class="token" hidden>
+        <p><strong>Copy this access token into Unity's SocketIOManager.testToken.</strong> It is shown only once and expires according to the Supabase Auth token lifetime.</p>
+        <label>Unity access token <textarea id="access-token" readonly></textarea></label>
+        <div class="row">
+          <button type="button" id="copy-token">Copy token</button>
+          <span id="created-user" class="muted"></span>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Player controls</h2>
+      <form id="credit-form">
+        <label>Selected player ID <input id="player-id" name="userId" required></label>
+        <label>Credit adjustment (+/- demo credits) <input name="deltaCredits" type="number" step="0.01" min="-100000" max="100000" required></label>
+        <button type="submit">Apply adjustment</button>
+      </form>
+      <p class="muted">Use the player list to select an account. Disabling a player bans sign-in; it does not delete the account or its history.</p>
+      <div class="row">
+        <button type="button" id="refresh-users">Refresh players</button>
+        <span class="muted">Showing up to the 100 most recent Supabase Auth users.</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Player</th><th>ID</th><th>Demo balance</th><th>Status</th><th>Controls</th></tr></thead>
+          <tbody id="users"><tr><td colspan="5">Unlock the panel, then refresh.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+    <p id="status" role="status" aria-live="polite"></p>
+  </main>
+  <script>
+    const keyInput = document.querySelector("#admin-key");
+    const status = document.querySelector("#status");
+    const usersBody = document.querySelector("#users");
+    const tokenPanel = document.querySelector("#token-panel");
+    const rootUrl = "http://localhost:5000"; // Change this if the backend is hosted elsewhere
+    let adminKey = "";
+
+    function message(text) {
+      status.textContent = text;
+    }
+
+    async function adminFetch(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: {
+          "Content-Type": "application/json",
+          "x-dev-admin-key": adminKey,
+          ...(options.headers || {})
+        }
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || `Request failed (${response.status}).`);
+      return body;
+    }
+
+    document.querySelector("#admin-key-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      adminKey = keyInput.value;
+      try {
+        await loadUsers();
+        message("Admin access verified.");
+      } catch (error) {
+        adminKey = "";
+        message(error instanceof Error ? error.message : "Unable to unlock admin panel.");
+      }
+    });
+
+    document.querySelector("#clear-key").addEventListener("click", () => {
+      adminKey = "";
+      keyInput.value = "";
+      usersBody.replaceChildren();
+      tokenPanel.hidden = true;
+      message("Admin panel locked.");
+    });
+
+    async function loadUsers() {
+      const { users } = await adminFetch(`${rootUrl}/api/dev/users`);
+      usersBody.replaceChildren();
+      if (users.length === 0) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 5;
+        cell.textContent = "No demo players have been created.";
+        row.append(cell);
+        usersBody.append(row);
+        return;
+      }
+
+      for (const user of users) {
+        const row = document.createElement("tr");
+        for (const text of [
+          `${user.username || "Player"}${user.email ? ` (${user.email})` : ""}`,
+          user.id,
+          user.balance === null ? "Wallet unavailable" : `${Number(user.balance).toFixed(2)} DEMO`,
+          user.enabled ? "Enabled" : "Disabled"
+        ]) {
+          const cell = document.createElement("td");
+          cell.textContent = text;
+          row.append(cell);
+        }
+        const controls = document.createElement("td");
+        const select = document.createElement("button");
+        select.type = "button";
+        select.className = "secondary";
+        select.textContent = "Select";
+        select.addEventListener("click", () => {
+          document.querySelector("#player-id").value = user.id;
+          message(`Selected ${user.username || user.email || user.id}.`);
+        });
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = user.enabled ? "danger" : "secondary";
+        toggle.textContent = user.enabled ? "Disable" : "Enable";
+        toggle.addEventListener("click", async () => {
+          toggle.disabled = true;
+          try {
+            await adminFetch(`${rootUrl}/api/dev/users/${encodeURIComponent(user.id)}/status`, {
+              method: "PATCH",
+              body: JSON.stringify({ enabled: !user.enabled })
+            });
+            await loadUsers();
+            message(`Player ${user.enabled ? "disabled" : "enabled"}.`);
+          } catch (error) {
+            message(error instanceof Error ? error.message : "Could not update player.");
+          } finally {
+            toggle.disabled = false;
+          }
+        });
+        controls.append(select, toggle);
+        row.append(controls);
+        usersBody.append(row);
+      }
+    }
+
+    document.querySelector("#refresh-users").addEventListener("click", async () => {
+      try {
+        await loadUsers();
+        message("Player list refreshed.");
+      } catch (error) {
+        message(error instanceof Error ? error.message : "Could not load players.");
+      }
+    });
+
+    document.querySelector("#create-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const values = new FormData(form);
+      const payload = {
+        email: values.get("email"),
+        username: values.get("username") || undefined,
+        password: values.get("password")
+      };
+      try {
+        const result = await adminFetch(`${rootUrl}/api/dev/users`, {
+          method: "POST",
+          body: JSON.stringify(payload)
+        });
+        document.querySelector("#player-id").value = result.user.id;
+        document.querySelector("#access-token").value = result.accessToken;
+        document.querySelector("#created-user").textContent =
+          `${result.user.username} (${result.user.email}) | ID: ${result.user.id}`;
+        tokenPanel.hidden = false;
+        form.reset();
+        await loadUsers();
+        message("Demo player created. Copy the token into Unity now; it will not be stored in the admin panel.");
+      } catch (error) {
+        message(error instanceof Error ? error.message : "Could not create player.");
+      }
+    });
+
+    document.querySelector("#copy-token").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(document.querySelector("#access-token").value);
+        message("Unity test token copied.");
+      } catch {
+        message("Copy was blocked by the browser. Select the token text and copy it manually.");
+      }
+    });
+
+    document.querySelector("#credit-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const values = new FormData(event.currentTarget);
+      try {
+        const result = await adminFetch(`${rootUrl}/api/dev/demo-credits`, {
+          method: "POST",
+          body: JSON.stringify({
+            userId: values.get("userId"),
+            deltaCredits: values.get("deltaCredits")
+          })
+        });
+        await loadUsers();
+        message(`New balance: ${Number(result.balance).toFixed(2)} ${result.currency} (non-redeemable).`);
+      } catch (error) {
+        message(error instanceof Error ? error.message : "Could not adjust demo credits.");
+      }
+    });
+  </script>
+</body>
+</html>

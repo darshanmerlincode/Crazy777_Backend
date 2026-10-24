@@ -1,0 +1,75 @@
+Crazy777 Unity client integration parse sheet
+=============================================
+
+Inspected sources
+-----------------
+Assets\Scripts\SocketIOManager.cs
+Assets\Scripts\GameManager.cs
+Assets\Scripts\SlotBehaviour.cs
+Assets\Scripts\KeyStruct.cs
+Assets\Scripts\UIManager.cs
+Assets\Scripts\ImageAnimation.cs
+Assets\Scripts\AudioController.cs
+Assets\Scripts\JSFunctCalls.cs
+
+Socket authentication and events
+--------------------------------
+- Socket.IO auth data contains token and gameId. The client game id is "SL-CRZ".
+- The WebGL host supplies cookie as the auth token and socketURL. In the Unity Editor,
+  set SocketIOManager.testToken to a Supabase access token and use localhost:5000.
+- Server emits a typed JSON object on event "message", matching the Unity Root model.
+- "InitData" loads GameData.Bets, UIData.paylines.symbols and PlayerData.Balance.
+- "ResultData" loads GameData.resultSymbols and isFreeSpin/freeSpinCount plus
+  PlayerData.Balance, currentWining, haveWon and totalbet.
+- On a result, isFreeSpin means this spin awarded free spins; freeSpinCount is
+  the number newly awarded. The SPIN request's isFreeSpin flag indicates a
+  wager-free spin being consumed.
+- Client sends a JSON string on event "message" with id "SPIN".
+- SPIN.data.currentBet is the selected BET BUTTON INDEX (0-14), not the amount.
+  currentLines is 3, spins is 1, requestId is a UUID, and isFreeSpin is boolean.
+- "YES I AM ALIVE" is a keepalive message. "EXIT" requests session exit.
+- Socket notices on "internalError" are objects with a "message" property.
+
+Reel/result layout
+------------------
+- Backend supplies resultSymbols as three rows: upper, middle, lower.
+- Each row has four integer symbol IDs. The first three columns are the main slots;
+  the fourth is the bonus slot.
+- IDs 1-5 map to the standard visual-symbol switch in SlotBehaviour:
+  1=777, 2=77, 3=7, 4=BAR/BAR, 5=BAR.
+- IDs 6-11 are power symbols and are generated only in the fourth column:
+  6=10X, 7=5X, 8=2X, 9=DOUBLE+, 10=ADD, 11=RESPIN. Only the middle-row
+  fourth-column symbol has a payout/free-spin effect; top/bottom rows are display.
+- ID 0 is treated as an empty result by the client's animation logic.
+- SlotBehaviour's win checking is mostly presentation logic. The client has TODOs
+  for backend win lines and popups; it trusts PlayerData.currentWining for the
+  displayed amount.
+
+Demo game rules implemented here
+--------------------------------
+- Bets per line: 0.20 through 3.00 DEMO credits in 0.20 increments (15 buttons).
+- Three lines are charged per paid spin (0.60 through 9.00 DEMO credits).
+- A higher bet changes the credits risked per spin, not the game's return percentage.
+- The three first cells of the middle row alone determine rewards. A zero in
+  any of those cells prevents a reward/free-spin award. A matching triple pays
+  the per-line bet multiplied by 3/2/1/1/1 for symbol IDs 1-5. A mixed
+  all-nonzero trio returns 0.25 times the per-line bet.
+- In either rewarded trio, a middle-row fourth-column 10X/5X/2X multiplies
+  the base reward; DOUBLE+ adds two per-line bets; ADD adds one per-line bet.
+- RESPIN in the middle-row fourth column, with a non-zero matching triple,
+  awards 15/10/5/3/1 free spins for symbol IDs 1/2/3/4/5 respectively.
+  Specifically, 2,2,2 plus RESPIN awards 10. Free spins deduct no wager,
+  pay wins by the same rules, and can retrigger.
+- Zero is possible throughout the grid. Power IDs 6-11 are restricted to
+  the fourth column; top and bottom rows do not affect payouts or free spins.
+- The expanded demo rules do not claim a certified or fixed 90% RTP.
+- Wallet balances are integer hundredths of a DEMO credit in PostgreSQL.
+  No real currency or payment-provider flow exists.
+
+Assets limitations
+------------------
+The Unity scripts establish the visual symbol IDs and names above, but do not
+contain a complete authoritative reel-strip distribution or bonus paytable.
+Sprite arrays and animation lists are assigned in Unity scene/prefab data.
+The demo backend's payout table is intentionally independent of unknown art
+configuration, and its awards must not be represented as real-money game math.
