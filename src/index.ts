@@ -11,7 +11,7 @@ import { BETS_CENTS, createDemoOutcome, credits, LINE_COUNT, SYMBOLS } from "./g
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   PORT: z.coerce.number().int().min(1).max(65535).default(5000),
-  CORS_ORIGINS: z.string().default("http://localhost:3000,http://127.0.0.1:5500"),
+  CORS_ORIGINS: z.string().default("https://darshanmerlincode.github.io,http://localhost:3000,http://127.0.0.1:5500"),
   SUPABASE_URL: z.string().url(),
   SUPABASE_ANON_KEY: z.string().min(1),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
