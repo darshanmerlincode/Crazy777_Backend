@@ -30,6 +30,7 @@ const serviceClient = (0, supabase_js_1.createClient)(config.SUPABASE_URL, confi
 });
 const allowDemoSpins = config.NODE_ENV !== "production" || config.DEMO_CREDITS_ENABLED === "true";
 const app = (0, express_1.default)();
+const PERMANENT_TOKEN_PREFIX = "c777_dev_";
 app.disable("x-powered-by");
 app.use((0, helmet_1.default)({ contentSecurityPolicy: false }));
 app.use((0, cors_1.default)({ origin: true, credentials: true }));
@@ -141,7 +142,7 @@ app.get("/admin", (request, response) => {
         response.sendStatus(404);
         return;
     }
-    response.sendFile("admin_index.html", { root: process.cwd() });
+    response.sendFile("index.html", { root: process.cwd() });
 });
 function requireDevelopmentAdmin(request, response) {
     if (config.NODE_ENV !== "development" || !config.DEV_ADMIN_KEY) {
@@ -162,19 +163,24 @@ app.get("/api/dev/users", async (request, response, next) => {
         if (error)
             throw error;
         const userIds = data.users.map((user) => user.id);
-        const [profiles, wallets] = userIds.length === 0
-            ? [{ data: [], error: null }, { data: [], error: null }]
+        const [profiles, wallets, tokens] = userIds.length === 0
+            ? [{ data: [], error: null }, { data: [], error: null }, { data: [], error: null }]
             : await Promise.all([
                 serviceClient.from("profiles").select("id, username, created_at").in("id", userIds),
                 serviceClient.from("demo_wallets")
-                    .select("user_id, balance_cents, free_spins_remaining").in("user_id", userIds)
+                    .select("user_id, balance_cents, free_spins_remaining").in("user_id", userIds),
+                serviceClient.from("dev_socket_tokens")
+                    .select("user_id").in("user_id", userIds).is("revoked_at", null)
             ]);
         if (profiles.error)
             throw profiles.error;
         if (wallets.error)
             throw wallets.error;
+        if (tokens.error)
+            throw tokens.error;
         const profileById = new Map(profiles.data.map((profile) => [profile.id, profile]));
         const walletById = new Map(wallets.data.map((wallet) => [wallet.user_id, wallet]));
+        const usersWithPermanentTokens = new Set(tokens.data.map((token) => token.user_id));
         response.json({
             users: data.users.map((user) => {
                 const profile = profileById.get(user.id);
@@ -186,7 +192,8 @@ app.get("/api/dev/users", async (request, response, next) => {
                     createdAt: profile?.created_at ?? user.created_at,
                     enabled: !user.banned_until || Date.parse(user.banned_until) <= Date.now(),
                     balance: wallet ? (0, game_1.credits)(Number(wallet.balance_cents)) : null,
-                    freeSpins: wallet?.free_spins_remaining ?? 0
+                    freeSpins: wallet?.free_spins_remaining ?? 0,
+                    hasPermanentToken: usersWithPermanentTokens.has(user.id)
                 };
             })
         });
@@ -297,6 +304,67 @@ app.post("/api/dev/users/:userId/token", async (request, response, next) => {
         next(error);
     }
 });
+app.post("/api/dev/users/:userId/permanent-token", async (request, response, next) => {
+    if (!requireDevelopmentAdmin(request, response))
+        return;
+    const userId = zod_1.z.string().uuid().safeParse(request.params.userId);
+    if (!userId.success) {
+        response.status(400).json({ error: "Provide a valid user ID." });
+        return;
+    }
+    try {
+        const { data, error } = await serviceClient.auth.admin.getUserById(userId.data);
+        if (error)
+            throw error;
+        if (!data.user) {
+            response.status(404).json({ error: "Player not found." });
+            return;
+        }
+        if (data.user.banned_until && Date.parse(data.user.banned_until) > Date.now()) {
+            response.status(409).json({ error: "Enable this player before issuing a permanent development token." });
+            return;
+        }
+        const token = `${PERMANENT_TOKEN_PREFIX}${(0, node_crypto_1.randomBytes)(32).toString("base64url")}`;
+        const tokenHash = (0, node_crypto_1.createHash)("sha256").update(token).digest("hex");
+        const { error: rotateError } = await serviceClient.rpc("rotate_dev_socket_token", {
+            p_user_id: userId.data,
+            p_token_hash: tokenHash
+        });
+        if (rotateError)
+            throw rotateError;
+        io.in(userId.data).disconnectSockets(true);
+        response.json({
+            userId: userId.data,
+            accessToken: token,
+            expiresAt: null,
+            tokenType: "permanent-development"
+        });
+    }
+    catch (error) {
+        next(error);
+    }
+});
+app.delete("/api/dev/users/:userId/permanent-token", async (request, response, next) => {
+    if (!requireDevelopmentAdmin(request, response))
+        return;
+    const userId = zod_1.z.string().uuid().safeParse(request.params.userId);
+    if (!userId.success) {
+        response.status(400).json({ error: "Provide a valid user ID." });
+        return;
+    }
+    try {
+        const { error } = await serviceClient.rpc("revoke_dev_socket_token", {
+            p_user_id: userId.data
+        });
+        if (error)
+            throw error;
+        io.in(userId.data).disconnectSockets(true);
+        response.json({ userId: userId.data, revoked: true });
+    }
+    catch (error) {
+        next(error);
+    }
+});
 app.patch("/api/dev/users/:userId/status", async (request, response, next) => {
     if (!requireDevelopmentAdmin(request, response))
         return;
@@ -312,6 +380,14 @@ app.patch("/api/dev/users/:userId/status", async (request, response, next) => {
         });
         if (error)
             throw error;
+        if (!enabled.data) {
+            const { error: revokeError } = await serviceClient.rpc("revoke_dev_socket_token", {
+                p_user_id: userId.data
+            });
+            if (revokeError)
+                throw revokeError;
+        }
+        io.in(userId.data).disconnectSockets(true);
         response.json({
             userId: data.user.id,
             enabled: !data.user.banned_until || Date.parse(data.user.banned_until) <= Date.now()
@@ -368,16 +444,47 @@ io.use(async (socket, next) => {
         return;
     }
     try {
-        const { data, error } = await userClient.auth.getUser(auth.token);
-        if (error || !data.user) {
-            next(new Error("Invalid or expired access token."));
+        let user;
+        if (auth.token.startsWith(PERMANENT_TOKEN_PREFIX)) {
+            if (config.NODE_ENV !== "development") {
+                next(new Error("Permanent development tokens are disabled outside development."));
+                return;
+            }
+            const tokenHash = (0, node_crypto_1.createHash)("sha256").update(auth.token).digest("hex");
+            const { data: tokenRecord, error: tokenError } = await serviceClient
+                .from("dev_socket_tokens")
+                .select("user_id")
+                .eq("token_hash", tokenHash)
+                .is("revoked_at", null)
+                .maybeSingle();
+            if (tokenError)
+                throw tokenError;
+            if (!tokenRecord) {
+                next(new Error("Invalid or revoked development token."));
+                return;
+            }
+            const { data, error } = await serviceClient.auth.admin.getUserById(tokenRecord.user_id);
+            if (error)
+                throw error;
+            user = data.user;
+        }
+        else {
+            const { data, error } = await userClient.auth.getUser(auth.token);
+            if (error) {
+                next(new Error("Invalid or expired access token."));
+                return;
+            }
+            user = data.user;
+        }
+        if (!user) {
+            next(new Error("Player account not found."));
             return;
         }
-        if (data.user.banned_until && Date.parse(data.user.banned_until) > Date.now()) {
+        if (user.banned_until && Date.parse(user.banned_until) > Date.now()) {
             next(new Error("This demo player account is disabled."));
             return;
         }
-        socket.data.user = data.user;
+        socket.data.user = user;
         next();
     }
     catch (error) {
@@ -390,7 +497,9 @@ io.on("connection", (socket) => {
         socket.disconnect(true);
         return;
     }
-    void sendInitialData(socket, socket.data.user).catch((error) => {
+    const user = socket.data.user;
+    socket.join(user.id);
+    void sendInitialData(socket, user).catch((error) => {
         console.error("Socket initialization failed:", error);
         socket.emit("internalError", { message: "Unable to load player data." });
         socket.disconnect(true);

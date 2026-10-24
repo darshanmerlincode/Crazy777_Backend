@@ -6,6 +6,17 @@ create table if not exists public.profiles (
     created_at timestamptz not null default now()
 );
 
+create table if not exists public.dev_socket_tokens (
+    token_hash text primary key check (token_hash ~ '^[0-9a-f]{64}$'),
+    user_id uuid not null references auth.users(id) on delete cascade,
+    created_at timestamptz not null default now(),
+    revoked_at timestamptz
+);
+
+create unique index if not exists dev_socket_tokens_one_active_per_user_idx
+    on public.dev_socket_tokens (user_id)
+    where revoked_at is null;
+
 create table if not exists public.demo_wallets (
     user_id uuid primary key references public.profiles(id) on delete cascade,
     balance_cents bigint not null default 10000 check (balance_cents >= 0),
@@ -64,6 +75,7 @@ alter table public.profiles enable row level security;
 alter table public.demo_wallets enable row level security;
 alter table public.demo_wallet_transactions enable row level security;
 alter table public.demo_spins enable row level security;
+alter table public.dev_socket_tokens enable row level security;
 
 drop policy if exists "Users can read own profile" on public.profiles;
 create policy "Users can read own profile" on public.profiles
@@ -378,12 +390,64 @@ begin
 end;
 $$;
 
+create or replace function public.rotate_dev_socket_token(
+    p_user_id uuid,
+    p_token_hash text
+)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+    if p_token_hash !~ '^[0-9a-f]{64}$' then
+        raise exception 'invalid development token hash' using errcode = '22023';
+    end if;
+
+    perform 1 from auth.users where id = p_user_id for update;
+    if not found then
+        raise exception 'player not found' using errcode = 'P0002';
+    end if;
+
+    update public.dev_socket_tokens
+    set revoked_at = now()
+    where user_id = p_user_id and revoked_at is null;
+
+    insert into public.dev_socket_tokens (token_hash, user_id)
+    values (p_token_hash, p_user_id);
+end;
+$$;
+
+create or replace function public.revoke_dev_socket_token(p_user_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+    perform 1 from auth.users where id = p_user_id for update;
+    if not found then
+        raise exception 'player not found' using errcode = 'P0002';
+    end if;
+
+    update public.dev_socket_tokens
+    set revoked_at = now()
+    where user_id = p_user_id and revoked_at is null;
+end;
+$$;
+
 revoke all on function public.play_demo_spin(uuid, uuid, integer, jsonb, boolean) from public, anon, authenticated;
 revoke all on function public.adjust_demo_credits(uuid, bigint, uuid) from public, anon, authenticated;
+revoke all on function public.rotate_dev_socket_token(uuid, text) from public, anon, authenticated;
+revoke all on function public.revoke_dev_socket_token(uuid) from public, anon, authenticated;
 grant execute on function public.play_demo_spin(uuid, uuid, integer, jsonb, boolean) to service_role;
 grant execute on function public.adjust_demo_credits(uuid, bigint, uuid) to service_role;
+grant execute on function public.rotate_dev_socket_token(uuid, text) to service_role;
+grant execute on function public.revoke_dev_socket_token(uuid) to service_role;
 
 revoke insert, update, delete on public.profiles from anon, authenticated;
 revoke insert, update, delete on public.demo_wallets from anon, authenticated;
 revoke insert, update, delete on public.demo_wallet_transactions from anon, authenticated;
 revoke insert, update, delete on public.demo_spins from anon, authenticated;
+revoke all on public.dev_socket_tokens from anon, authenticated;
+grant select, insert, update, delete on public.dev_socket_tokens to service_role;

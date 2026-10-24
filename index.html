@@ -55,7 +55,7 @@
         <button type="submit">Create player and issue token</button>
       </form>
       <div id="token-panel" class="token" hidden>
-        <p><strong>Copy this access token into Unity's SocketIOManager.testToken.</strong> Tokens are not stored by the admin panel and expire according to the Supabase Auth token lifetime. Use the player list to issue a fresh token later.</p>
+        <p id="token-help"><strong>Copy this access token into Unity's SocketIOManager.testToken.</strong> Expiring Supabase tokens follow the project's Auth token lifetime. Permanent development tokens have no automatic expiry and can be revoked from the player list.</p>
         <label>Unity access token <textarea id="access-token" readonly></textarea></label>
         <div class="row">
           <button type="button" id="copy-token">Copy token</button>
@@ -90,11 +90,19 @@
     const status = document.querySelector("#status");
     const usersBody = document.querySelector("#users");
     const tokenPanel = document.querySelector("#token-panel");
-    const rootUrl = "https://crazy777-backend.onrender.com"; // Change this if the backend is hosted elsewhere
+    const rootUrl = "http://localhost:5000"; // Change this if the backend is hosted elsewhere
     let adminKey = "";
 
     function message(text) {
       status.textContent = text;
+    }
+
+    function showExpiringToken(expiresAt) {
+      const expiration = typeof expiresAt === "number"
+        ? new Date(expiresAt * 1000).toLocaleString()
+        : "the configured Supabase Auth lifetime";
+      document.querySelector("#token-help").textContent =
+        `This Supabase access token expires at ${expiration}. Use Regenerate token after it expires.`;
     }
 
     async function adminFetch(path, options = {}) {
@@ -198,6 +206,7 @@
             );
             document.querySelector("#player-id").value = user.id;
             document.querySelector("#access-token").value = result.accessToken;
+            showExpiringToken(result.expiresAt);
             document.querySelector("#created-user").textContent =
               `${user.username} (${user.email || user.id}) | ID: ${user.id}`;
             tokenPanel.hidden = false;
@@ -208,7 +217,58 @@
             issueToken.disabled = !user.enabled;
           }
         });
-        controls.append(select, toggle, issueToken);
+        const permanentTokenButton = document.createElement("button");
+        permanentTokenButton.type = "button";
+        permanentTokenButton.className = "secondary";
+        permanentTokenButton.textContent = user.hasPermanentToken
+          ? "Rotate permanent token"
+          : "Generate permanent token";
+        permanentTokenButton.disabled = !user.enabled;
+        permanentTokenButton.addEventListener("click", async () => {
+          permanentTokenButton.disabled = true;
+          try {
+            const result = await adminFetch(
+              `${rootUrl}/api/dev/users/${encodeURIComponent(user.id)}/permanent-token`,
+              { method: "POST" }
+            );
+            document.querySelector("#player-id").value = user.id;
+            document.querySelector("#access-token").value = result.accessToken;
+            document.querySelector("#token-help").textContent =
+              "Permanent development token: no automatic expiry. It is stored only as a hash, shown only now, and rotation invalidates the previous token.";
+            document.querySelector("#created-user").textContent =
+              `${user.username} (${user.email || user.id}) | ID: ${user.id}`;
+            tokenPanel.hidden = false;
+            await loadUsers();
+            message("Permanent development token issued. Copy it now; rotate it to replace it.");
+          } catch (error) {
+            message(error instanceof Error ? error.message : "Could not issue permanent token.");
+          } finally {
+            permanentTokenButton.disabled = !user.enabled;
+          }
+        });
+        controls.append(select, toggle, issueToken, permanentTokenButton);
+        if (user.hasPermanentToken) {
+          const revokeToken = document.createElement("button");
+          revokeToken.type = "button";
+          revokeToken.className = "danger";
+          revokeToken.textContent = "Revoke permanent token";
+          revokeToken.addEventListener("click", async () => {
+            revokeToken.disabled = true;
+            try {
+              await adminFetch(
+                `${rootUrl}/api/dev/users/${encodeURIComponent(user.id)}/permanent-token`,
+                { method: "DELETE" }
+              );
+              await loadUsers();
+              message("Permanent token revoked and the player's active socket sessions disconnected.");
+            } catch (error) {
+              message(error instanceof Error ? error.message : "Could not revoke permanent token.");
+            } finally {
+              revokeToken.disabled = false;
+            }
+          });
+          controls.append(revokeToken);
+        }
         row.append(controls);
         usersBody.append(row);
       }
@@ -239,6 +299,7 @@
         });
         document.querySelector("#player-id").value = result.user.id;
         document.querySelector("#access-token").value = result.accessToken;
+        showExpiringToken(result.expiresAt);
         document.querySelector("#created-user").textContent =
           `${result.user.username} (${result.user.email}) | ID: ${result.user.id}`;
         tokenPanel.hidden = false;

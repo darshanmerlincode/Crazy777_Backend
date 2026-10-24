@@ -17,7 +17,7 @@ This is a TypeScript/Express/Socket.IO integration backend for the Unity client.
 5. In Unity Editor, set `SocketIOManager.testToken` to the returned Supabase `accessToken`. The editor socket URL is already `http://localhost:5000`. WebGL obtains the token and socket URL from its host page.
 6. To build and run the backend tests: `npm run build` and `npm test`.
 
-For local test users, open `http://localhost:5000/admin`, enter `DEV_ADMIN_KEY`, and create a player. Copy the one-time access token shown into Unity's `SocketIOManager.testToken`; select a player in the list to adjust that player's demo credits or enable/disable the account. Keep the admin page local and never configure this development admin key in a production deployment.
+For local test users, open `http://localhost:5000/admin`, enter `DEV_ADMIN_KEY`, and create a player. The regular Supabase access token expires according to the project's Auth JWT lifetime and can be regenerated. The player list also offers a permanent development socket token: it has no automatic expiry, is stored only as a SHA-256 hash, is shown only once, and can be rotated or manually revoked from the panel. Revocation disconnects active sockets; disabling the player also revokes this token. This credential is accepted only by development Socket.IO, not HTTP profile routes or production. Treat it like a password; anyone who copies it can use that player's demo socket until it is revoked. Keep the admin page local and never configure this development admin key in a production deployment.
 
 Supabase Auth creates the profile and the initial 100.00 DEMO-credit wallet through the trigger in `schema.sql`. Disable email confirmation only for a controlled local demo if that is useful; do not weaken production authentication.
 
@@ -28,7 +28,7 @@ Express and Socket.IO accept requests from any origin and reflect the requesting
 - `POST /api/auth/signup` and `POST /api/auth/login`: Supabase Auth user creation/session.
 - `GET /api/profile`: authenticated profile and non-redeemable demo-credit totals.
 - `GET /api/health`: health check.
-- `GET /admin`: development-only single-page admin panel. It can create test players, issue a Supabase access token for Unity, list the first 100 auth accounts, enable/disable accounts, and adjust demo credits. Admin API calls require `x-dev-admin-key`; each credit adjustment is recorded.
+- `GET /admin`: development-only single-page admin panel. It can create test players, issue expiring Supabase access tokens or manually revocable development socket tokens for Unity, list the first 100 auth accounts, enable/disable accounts, and adjust demo credits. Admin API calls require `x-dev-admin-key`; each credit adjustment is recorded.
 - Socket.IO: auth `{ "token": "<Supabase access token>", "gameId": "SL-CRZ" }`; the server emits typed JSON objects rather than JSON-encoded strings on `message`, to match the Unity client's `On<Root>` subscription. Message shapes are described in `PARSE-SHEET.txt`.
 
 Production starts with demo spins disabled. To run a free-to-play demo in a production environment, explicitly set `DEMO_CREDITS_ENABLED=true`; this still enables **only** non-redeemable demo credits and does not enable purchases or real-money play.

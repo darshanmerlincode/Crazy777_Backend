@@ -16,7 +16,10 @@ Socket authentication and events
 --------------------------------
 - Socket.IO auth data contains token and gameId. The client game id is "SL-CRZ".
 - The WebGL host supplies cookie as the auth token and socketURL. In the Unity Editor,
-  set SocketIOManager.testToken to a Supabase access token and use localhost:5000.
+  set SocketIOManager.testToken to an expiring Supabase access token or a permanent
+  development socket token, and use localhost:5000. Permanent tokens have no automatic
+  expiry, are only accepted in development Socket.IO, and can be revoked in the admin
+  player list; never use them in production.
 - Server emits a typed JSON object on event "message", matching the Unity Root model.
 - "InitData" loads GameData.Bets, UIData.paylines.symbols and PlayerData.Balance.
 - "ResultData" loads GameData.resultSymbols and isFreeSpin/freeSpinCount plus

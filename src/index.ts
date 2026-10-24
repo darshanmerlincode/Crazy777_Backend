@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import cors from "cors";
 import express, { NextFunction, Request, Response } from "express";
 import helmet from "helmet";
@@ -27,6 +27,7 @@ const serviceClient = createClient(config.SUPABASE_URL, config.SUPABASE_SERVICE_
 });
 const allowDemoSpins = config.NODE_ENV !== "production" || config.DEMO_CREDITS_ENABLED === "true";
 const app = express();
+const PERMANENT_TOKEN_PREFIX = "c777_dev_";
 
 app.disable("x-powered-by");
 app.use(helmet({ contentSecurityPolicy: false }));
@@ -142,7 +143,7 @@ app.get("/admin", (request, response) => {
     response.sendStatus(404);
     return;
   }
-  response.sendFile("admin_index.html", { root: process.cwd() });
+  response.sendFile("index.html", { root: process.cwd() });
 });
 
 function requireDevelopmentAdmin(request: Request, response: Response): boolean {
@@ -163,18 +164,22 @@ app.get("/api/dev/users", async (request, response, next) => {
     const { data, error } = await serviceClient.auth.admin.listUsers({ page: 1, perPage: 100 });
     if (error) throw error;
     const userIds = data.users.map((user) => user.id);
-    const [profiles, wallets] = userIds.length === 0
-      ? [{ data: [], error: null }, { data: [], error: null }]
+    const [profiles, wallets, tokens] = userIds.length === 0
+      ? [{ data: [], error: null }, { data: [], error: null }, { data: [], error: null }]
       : await Promise.all([
         serviceClient.from("profiles").select("id, username, created_at").in("id", userIds),
         serviceClient.from("demo_wallets")
-          .select("user_id, balance_cents, free_spins_remaining").in("user_id", userIds)
+          .select("user_id, balance_cents, free_spins_remaining").in("user_id", userIds),
+        serviceClient.from("dev_socket_tokens")
+          .select("user_id").in("user_id", userIds).is("revoked_at", null)
       ]);
     if (profiles.error) throw profiles.error;
     if (wallets.error) throw wallets.error;
+    if (tokens.error) throw tokens.error;
 
     const profileById = new Map(profiles.data.map((profile) => [profile.id, profile]));
     const walletById = new Map(wallets.data.map((wallet) => [wallet.user_id, wallet]));
+    const usersWithPermanentTokens = new Set(tokens.data.map((token) => token.user_id));
     response.json({
       users: data.users.map((user) => {
         const profile = profileById.get(user.id);
@@ -186,7 +191,8 @@ app.get("/api/dev/users", async (request, response, next) => {
           createdAt: profile?.created_at ?? user.created_at,
           enabled: !user.banned_until || Date.parse(user.banned_until) <= Date.now(),
           balance: wallet ? credits(Number(wallet.balance_cents)) : null,
-          freeSpins: wallet?.free_spins_remaining ?? 0
+          freeSpins: wallet?.free_spins_remaining ?? 0,
+          hasPermanentToken: usersWithPermanentTokens.has(user.id)
         };
       })
     });
@@ -299,6 +305,63 @@ app.post("/api/dev/users/:userId/token", async (request, response, next) => {
   }
 });
 
+app.post("/api/dev/users/:userId/permanent-token", async (request, response, next) => {
+  if (!requireDevelopmentAdmin(request, response)) return;
+  const userId = z.string().uuid().safeParse(request.params.userId);
+  if (!userId.success) {
+    response.status(400).json({ error: "Provide a valid user ID." });
+    return;
+  }
+  try {
+    const { data, error } = await serviceClient.auth.admin.getUserById(userId.data);
+    if (error) throw error;
+    if (!data.user) {
+      response.status(404).json({ error: "Player not found." });
+      return;
+    }
+    if (data.user.banned_until && Date.parse(data.user.banned_until) > Date.now()) {
+      response.status(409).json({ error: "Enable this player before issuing a permanent development token." });
+      return;
+    }
+
+    const token = `${PERMANENT_TOKEN_PREFIX}${randomBytes(32).toString("base64url")}`;
+    const tokenHash = createHash("sha256").update(token).digest("hex");
+    const { error: rotateError } = await serviceClient.rpc("rotate_dev_socket_token", {
+      p_user_id: userId.data,
+      p_token_hash: tokenHash
+    });
+    if (rotateError) throw rotateError;
+    io.in(userId.data).disconnectSockets(true);
+    response.json({
+      userId: userId.data,
+      accessToken: token,
+      expiresAt: null,
+      tokenType: "permanent-development"
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/dev/users/:userId/permanent-token", async (request, response, next) => {
+  if (!requireDevelopmentAdmin(request, response)) return;
+  const userId = z.string().uuid().safeParse(request.params.userId);
+  if (!userId.success) {
+    response.status(400).json({ error: "Provide a valid user ID." });
+    return;
+  }
+  try {
+    const { error } = await serviceClient.rpc("revoke_dev_socket_token", {
+      p_user_id: userId.data
+    });
+    if (error) throw error;
+    io.in(userId.data).disconnectSockets(true);
+    response.json({ userId: userId.data, revoked: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.patch("/api/dev/users/:userId/status", async (request, response, next) => {
   if (!requireDevelopmentAdmin(request, response)) return;
   const userId = z.string().uuid().safeParse(request.params.userId);
@@ -312,6 +375,13 @@ app.patch("/api/dev/users/:userId/status", async (request, response, next) => {
       ban_duration: enabled.data ? "none" : "876000h"
     });
     if (error) throw error;
+    if (!enabled.data) {
+      const { error: revokeError } = await serviceClient.rpc("revoke_dev_socket_token", {
+        p_user_id: userId.data
+      });
+      if (revokeError) throw revokeError;
+    }
+    io.in(userId.data).disconnectSockets(true);
     response.json({
       userId: data.user.id,
       enabled: !data.user.banned_until || Date.parse(data.user.banned_until) <= Date.now()
@@ -385,16 +455,44 @@ io.use(async (socket, next) => {
     return;
   }
   try {
-    const { data, error } = await userClient.auth.getUser(auth.token);
-    if (error || !data.user) {
-      next(new Error("Invalid or expired access token."));
+    let user: User | null;
+    if (auth.token.startsWith(PERMANENT_TOKEN_PREFIX)) {
+      if (config.NODE_ENV !== "development") {
+        next(new Error("Permanent development tokens are disabled outside development."));
+        return;
+      }
+      const tokenHash = createHash("sha256").update(auth.token).digest("hex");
+      const { data: tokenRecord, error: tokenError } = await serviceClient
+        .from("dev_socket_tokens")
+        .select("user_id")
+        .eq("token_hash", tokenHash)
+        .is("revoked_at", null)
+        .maybeSingle();
+      if (tokenError) throw tokenError;
+      if (!tokenRecord) {
+        next(new Error("Invalid or revoked development token."));
+        return;
+      }
+      const { data, error } = await serviceClient.auth.admin.getUserById(tokenRecord.user_id);
+      if (error) throw error;
+      user = data.user;
+    } else {
+      const { data, error } = await userClient.auth.getUser(auth.token);
+      if (error) {
+        next(new Error("Invalid or expired access token."));
+        return;
+      }
+      user = data.user;
+    }
+    if (!user) {
+      next(new Error("Player account not found."));
       return;
     }
-    if (data.user.banned_until && Date.parse(data.user.banned_until) > Date.now()) {
+    if (user.banned_until && Date.parse(user.banned_until) > Date.now()) {
       next(new Error("This demo player account is disabled."));
       return;
     }
-    socket.data.user = data.user;
+    socket.data.user = user;
     next();
   } catch (error) {
     next(error instanceof Error ? error : new Error("Socket authentication failed."));
@@ -407,7 +505,9 @@ io.on("connection", (socket: Socket) => {
     socket.disconnect(true);
     return;
   }
-  void sendInitialData(socket, socket.data.user as User).catch((error: unknown) => {
+  const user = socket.data.user as User;
+  socket.join(user.id);
+  void sendInitialData(socket, user).catch((error: unknown) => {
     console.error("Socket initialization failed:", error);
     socket.emit("internalError", { message: "Unable to load player data." });
     socket.disconnect(true);
