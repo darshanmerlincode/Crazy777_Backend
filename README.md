@@ -21,7 +21,7 @@ For local test users, open `http://localhost:5000/admin`, enter `DEV_ADMIN_KEY`,
 
 Supabase Auth creates the profile and the initial 100.00 DEMO-credit wallet through the trigger in `schema.sql`. Disable email confirmation only for a controlled local demo if that is useful; do not weaken production authentication.
 
-The default CORS allowlist includes `http://127.0.0.1:5500` for a local static frontend. The `.env` value can contain multiple comma-separated exact origins; credentialed requests must not use a wildcard origin.
+Express and Socket.IO accept requests from any origin and reflect the requesting origin to support credentialed browser requests. CORS is not authentication or API access control: keep protected routes authenticated, and restrict origins before deploying publicly if client origins are known.
 
 ## Routes
 

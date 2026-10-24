@@ -15,7 +15,6 @@ const game_1 = require("./game");
 const envSchema = zod_1.z.object({
     NODE_ENV: zod_1.z.enum(["development", "production", "test"]).default("development"),
     PORT: zod_1.z.coerce.number().int().min(1).max(65535).default(5000),
-    CORS_ORIGINS: zod_1.z.string().default("http://localhost:3000,http://127.0.0.1:5500"),
     SUPABASE_URL: zod_1.z.string().url(),
     SUPABASE_ANON_KEY: zod_1.z.string().min(1),
     SUPABASE_SERVICE_ROLE_KEY: zod_1.z.string().min(1),
@@ -31,10 +30,9 @@ const serviceClient = (0, supabase_js_1.createClient)(config.SUPABASE_URL, confi
 });
 const allowDemoSpins = config.NODE_ENV !== "production" || config.DEMO_CREDITS_ENABLED === "true";
 const app = (0, express_1.default)();
-const origins = config.CORS_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean);
 app.disable("x-powered-by");
 app.use((0, helmet_1.default)({ contentSecurityPolicy: false }));
-app.use((0, cors_1.default)({ origin: origins, credentials: true }));
+app.use((0, cors_1.default)({ origin: true, credentials: true }));
 app.use(express_1.default.json({ limit: "16kb" }));
 app.get("/api/health", (_request, response) => {
     response.json({ status: "ok", demoCreditsOnly: true });
@@ -250,6 +248,55 @@ app.post("/api/dev/users", async (request, response, next) => {
         next(error);
     }
 });
+app.post("/api/dev/users/:userId/token", async (request, response, next) => {
+    if (!requireDevelopmentAdmin(request, response))
+        return;
+    const userId = zod_1.z.string().uuid().safeParse(request.params.userId);
+    if (!userId.success) {
+        response.status(400).json({ error: "Provide a valid user ID." });
+        return;
+    }
+    try {
+        const { data: userData, error: userError } = await serviceClient.auth.admin.getUserById(userId.data);
+        if (userError)
+            throw userError;
+        if (!userData.user?.email) {
+            response.status(404).json({ error: "Player has no email address." });
+            return;
+        }
+        if (userData.user.banned_until && Date.parse(userData.user.banned_until) > Date.now()) {
+            response.status(409).json({ error: "Enable this player before issuing a test token." });
+            return;
+        }
+        const { data: linkData, error: linkError } = await serviceClient.auth.admin.generateLink({
+            type: "magiclink",
+            email: userData.user.email
+        });
+        if (linkError)
+            throw linkError;
+        if (!linkData.properties.hashed_token) {
+            throw new Error("Supabase did not return a token for the test session.");
+        }
+        const tokenClient = (0, supabase_js_1.createClient)(config.SUPABASE_URL, config.SUPABASE_ANON_KEY, {
+            auth: { persistSession: false, autoRefreshToken: false }
+        });
+        const { data: sessionData, error: sessionError } = await tokenClient.auth.verifyOtp({
+            token_hash: linkData.properties.hashed_token,
+            type: "magiclink"
+        });
+        if (sessionError || !sessionData.session) {
+            throw sessionError ?? new Error("Unable to issue a Unity test session.");
+        }
+        response.json({
+            userId: userData.user.id,
+            accessToken: sessionData.session.access_token,
+            expiresAt: sessionData.session.expires_at
+        });
+    }
+    catch (error) {
+        next(error);
+    }
+});
 app.patch("/api/dev/users/:userId/status", async (request, response, next) => {
     if (!requireDevelopmentAdmin(request, response))
         return;
@@ -301,7 +348,7 @@ const httpServer = app.listen(config.PORT, () => {
     console.log(`Demo backend listening on port ${config.PORT} (${config.NODE_ENV})`);
 });
 const io = new socket_io_1.Server(httpServer, {
-    cors: { origin: origins, credentials: true },
+    cors: { origin: true, credentials: true },
     transports: ["websocket", "polling"]
 });
 const spinSchema = zod_1.z.object({

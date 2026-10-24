@@ -19,8 +19,6 @@ const envSchema = z.object({
 });
 
 const config = envSchema.parse(process.env);
-
-const config = envSchema.parse(process.env);
 const userClient = createClient(config.SUPABASE_URL, config.SUPABASE_ANON_KEY, {
   auth: { persistSession: false, autoRefreshToken: false }
 });
@@ -29,7 +27,6 @@ const serviceClient = createClient(config.SUPABASE_URL, config.SUPABASE_SERVICE_
 });
 const allowDemoSpins = config.NODE_ENV !== "production" || config.DEMO_CREDITS_ENABLED === "true";
 const app = express();
-const origins = config.CORS_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean);
 
 app.disable("x-powered-by");
 app.use(helmet({ contentSecurityPolicy: false }));
@@ -246,6 +243,58 @@ app.post("/api/dev/users", async (request, response, next) => {
         console.error("Could not roll back partially created demo account:", deleteError);
       }
     }
+    next(error);
+  }
+});
+
+app.post("/api/dev/users/:userId/token", async (request, response, next) => {
+  if (!requireDevelopmentAdmin(request, response)) return;
+  const userId = z.string().uuid().safeParse(request.params.userId);
+  if (!userId.success) {
+    response.status(400).json({ error: "Provide a valid user ID." });
+    return;
+  }
+
+  try {
+    const { data: userData, error: userError } =
+      await serviceClient.auth.admin.getUserById(userId.data);
+    if (userError) throw userError;
+    if (!userData.user?.email) {
+      response.status(404).json({ error: "Player has no email address." });
+      return;
+    }
+    if (userData.user.banned_until && Date.parse(userData.user.banned_until) > Date.now()) {
+      response.status(409).json({ error: "Enable this player before issuing a test token." });
+      return;
+    }
+
+    const { data: linkData, error: linkError } =
+      await serviceClient.auth.admin.generateLink({
+        type: "magiclink",
+        email: userData.user.email
+      });
+    if (linkError) throw linkError;
+    if (!linkData.properties.hashed_token) {
+      throw new Error("Supabase did not return a token for the test session.");
+    }
+
+    const tokenClient = createClient(config.SUPABASE_URL, config.SUPABASE_ANON_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false }
+    });
+    const { data: sessionData, error: sessionError } = await tokenClient.auth.verifyOtp({
+      token_hash: linkData.properties.hashed_token,
+      type: "magiclink"
+    });
+    if (sessionError || !sessionData.session) {
+      throw sessionError ?? new Error("Unable to issue a Unity test session.");
+    }
+
+    response.json({
+      userId: userData.user.id,
+      accessToken: sessionData.session.access_token,
+      expiresAt: sessionData.session.expires_at
+    });
+  } catch (error) {
     next(error);
   }
 });

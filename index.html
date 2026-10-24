@@ -55,7 +55,7 @@
         <button type="submit">Create player and issue token</button>
       </form>
       <div id="token-panel" class="token" hidden>
-        <p><strong>Copy this access token into Unity's SocketIOManager.testToken.</strong> It is shown only once and expires according to the Supabase Auth token lifetime.</p>
+        <p><strong>Copy this access token into Unity's SocketIOManager.testToken.</strong> Tokens are not stored by the admin panel and expire according to the Supabase Auth token lifetime. Use the player list to issue a fresh token later.</p>
         <label>Unity access token <textarea id="access-token" readonly></textarea></label>
         <div class="row">
           <button type="button" id="copy-token">Copy token</button>
@@ -90,7 +90,7 @@
     const status = document.querySelector("#status");
     const usersBody = document.querySelector("#users");
     const tokenPanel = document.querySelector("#token-panel");
-    const rootUrl = "https://crazy777-backend.onrender.com"; // Change this if the backend is hosted elsewhere
+    const rootUrl = "http://localhost:5000"; // Change this if the backend is hosted elsewhere
     let adminKey = "";
 
     function message(text) {
@@ -184,7 +184,31 @@
             toggle.disabled = false;
           }
         });
-        controls.append(select, toggle);
+        const issueToken = document.createElement("button");
+        issueToken.type = "button";
+        issueToken.className = "secondary";
+        issueToken.textContent = "Regenerate token";
+        issueToken.disabled = !user.enabled;
+        issueToken.addEventListener("click", async () => {
+          issueToken.disabled = true;
+          try {
+            const result = await adminFetch(
+              `${rootUrl}/api/dev/users/${encodeURIComponent(user.id)}/token`,
+              { method: "POST" }
+            );
+            document.querySelector("#player-id").value = user.id;
+            document.querySelector("#access-token").value = result.accessToken;
+            document.querySelector("#created-user").textContent =
+              `${user.username} (${user.email || user.id}) | ID: ${user.id}`;
+            tokenPanel.hidden = false;
+            message("Fresh Unity test token issued. Copy it using Copy token.");
+          } catch (error) {
+            message(error instanceof Error ? error.message : "Could not regenerate token.");
+          } finally {
+            issueToken.disabled = !user.enabled;
+          }
+        });
+        controls.append(select, toggle, issueToken);
         row.append(controls);
         usersBody.append(row);
       }
