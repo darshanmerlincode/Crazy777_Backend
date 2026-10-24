@@ -11,13 +11,14 @@ import { BETS_CENTS, createDemoOutcome, credits, LINE_COUNT, SYMBOLS } from "./g
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   PORT: z.coerce.number().int().min(1).max(65535).default(5000),
-  CORS_ORIGINS: z.string().default("https://darshanmerlincode.github.io,http://localhost:3000,http://127.0.0.1:5500"),
   SUPABASE_URL: z.string().url(),
   SUPABASE_ANON_KEY: z.string().min(1),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   DEV_ADMIN_KEY: z.string().min(32).optional(),
   DEMO_CREDITS_ENABLED: z.enum(["true", "false"]).default("false")
 });
+
+const config = envSchema.parse(process.env);
 
 const config = envSchema.parse(process.env);
 const userClient = createClient(config.SUPABASE_URL, config.SUPABASE_ANON_KEY, {
@@ -32,7 +33,7 @@ const origins = config.CORS_ORIGINS.split(",").map((origin) => origin.trim()).fi
 
 app.disable("x-powered-by");
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(cors({ origin: origins, credentials: true }));
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: "16kb" }));
 
 app.get("/api/health", (_request, response) => {
@@ -297,7 +298,7 @@ const httpServer = app.listen(config.PORT, () => {
   console.log(`Demo backend listening on port ${config.PORT} (${config.NODE_ENV})`);
 });
 const io = new Server(httpServer, {
-  cors: { origin: origins, credentials: true },
+  cors: { origin: true, credentials: true },
   transports: ["websocket", "polling"]
 });
 
